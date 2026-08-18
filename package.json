@@ -1,0 +1,22 @@
+{
+  "name": "mini-nest",
+  "version": "0.1.0",
+  "description": "An IoC container built on reflect-metadata",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "test": "node --test 'dist/test/**/*.test.js'",
+    "dev": "npm run build && (tsc -w --preserveWatchOutput & node --test --watch 'dist/test/**/*.test.js')"
+  },
+  "dependencies": {
+    "reflect-metadata": "^0.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^6.0.0"
+  }
+}
