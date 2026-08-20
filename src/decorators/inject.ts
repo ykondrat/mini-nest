@@ -16,5 +16,5 @@ export function Inject(token: Token): ParameterDecorator {
 }
 
 export function getInjectTokens(target: Constructor): InjectMap {
-  return Reflect.getOwnMetadata(INJECT_TOKENS, target) ?? {};
+  return Reflect.getMetadata(INJECT_TOKENS, target) ?? {};
 }

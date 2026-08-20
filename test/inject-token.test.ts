@@ -6,8 +6,7 @@ import { test } from 'node:test';
 import { Container } from '../src/container';
 import { Inject } from '../src/decorators/inject';
 import { Injectable } from '../src/decorators/injectable';
-
-const CONFIG = Symbol.for('CONFIG');
+import { CONFIG } from '../src/tokens';
 
 interface AppConfig {
   databaseUrl: string;
