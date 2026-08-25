@@ -1,11 +1,10 @@
 services:
   api:
     build:
-      target: builder
-    command: npm run dev
+      target: dev
     environment:
       NODE_ENV: development
+    command: npm run dev:server
     volumes:
       - ./src:/app/src
-      - ./test:/app/test
-      - ./tsconfig.json:/app/tsconfig.json
+      - ./tsconfig.json:/app/tsconfig.json:ro
