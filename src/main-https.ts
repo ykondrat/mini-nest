@@ -6,6 +6,8 @@ import * as path from 'node:path';
 import { Application } from './dispatcher';
 import { UsersController } from './users/users.controller';
 import { UsersService } from './users/users.service';
+import { GreetingService } from './services/greeting.service';
+import { LoggingInterceptor } from './interceptors/logging.interceptor';
 import { createPool } from './database/database';
 import { DATABASE_POOL } from './tokens';
 
@@ -32,7 +34,8 @@ async function bootstrap(): Promise<void> {
   const pool = createPool();
   const app = new Application(
     [UsersController],
-    [{ provide: DATABASE_POOL, useValue: pool }, UsersService],
+    [{ provide: DATABASE_POOL, useValue: pool }, UsersService, GreetingService],
+    { interceptors: [LoggingInterceptor] },
   );
 
   const { port: bound, close } = await app.listenTls(port, { key, cert });

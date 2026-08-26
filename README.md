@@ -20,6 +20,37 @@ An IoC (Inversion of Control) container — the thing NestJS runs under the hood
 - DTO validation through a `ValidationPipe` (class-validator) — an invalid body returns `400` with a field list; a valid body reaches the handler as a DTO instance.
 - The demo `/users` feature is backed by Postgres — the `pg` connection pool is registered as a value provider and injected into `UsersService` via `@Inject(DATABASE_POOL)`.
 
+**Request lifecycle**
+
+- Every request runs the full NestJS-style loop: Middleware → Guard → Interceptor (before) → Pipe → Handler → Interceptor (after) → Exception Filter.
+- Guard (`AuthGuard`) answers let it through or not, before everything, and cannot change the response — `false` → `403`, handler never runs.
+- Interceptor (`LoggingInterceptor`) wraps the call — sees both input and output — and logs `METHOD /path — 12.3 ms`.
+- Pipe (`ZodValidationPipe`, Zod 4) transforms/validates one argument right before the handler; invalid body → `400` with a field list.
+- Exception filter maps any thrown error to HTTP: `NotFoundError`→`404`, `ValidationError`→`400`, anything else→`500` (no message or stack leaked).
+- Hooks register two ways, merged: globally via `new Application(controllers, providers, { guards, interceptors, … })` and per-route via `@UseGuards` / `@UseInterceptors`.
+- A per-request `requestId` (from `X-Request-Id` or generated) lives in `AsyncLocalStorage`, so any code deep in the stack reads it without a parameter, and it's echoed back in the `X-Request-Id` response header.
+
+## Request lifecycle
+
+```
+                 ┌──────────────────── als.run({ requestId }) ────────────────────┐
+                 │                                                                │
+  request ──▶ Middleware ──▶ Guard ──▶ Interceptor(before) ──▶ Pipe ──▶ Handler   │
+                 │                            │                                │  │
+                 │                            └────────── Interceptor(after) ◀─┘  │
+                 │                                                                │
+                 └───────────────── Exception Filter (top-level try/catch) ───────┘
+                                              │
+                                          response  (+ X-Request-Id header)
+```
+
+- `als.run(store, handler)` wraps the whole request, so a service two levels below the handler reads `requestId` straight from the store.
+- The exception filter is the `try/catch`, so it also catches whatever a guard or interceptor throws.
+
+### Why AsyncLocalStorage, not a global variable
+
+A single `let currentRequestId` cannot work under concurrency: while one request is parked on an `await`, the event loop picks up the next request and overwrites the global — by the time the first request resumes and logs, the global already holds a different request's id. `AsyncLocalStorage.run(store, cb)` instead binds the store to the async execution context of that one request; every `await` inside it keeps seeing its own store, and a parallel request gets a separate one. That is why 10 concurrent requests never leak ids into each other's responses — a plain global provably does.
+
 ## Requirements
 
 - Node.js ≥ 22 (the tests use the built-in `node:test` runner)

@@ -6,11 +6,12 @@ export interface ParamMetadata {
   index: number;
   source: ParamSource;
   name?: string;
+  schema?: unknown;
 }
 
 export const ROUTE_PARAMS = Symbol.for('mini-nest:route-params');
 
-function paramDecorator(source: ParamSource, name?: string): ParameterDecorator {
+function paramDecorator(source: ParamSource, name?: string, schema?: unknown): ParameterDecorator {
   return (target, propertyKey, parameterIndex) => {
     if (propertyKey === undefined) return;
 
@@ -19,13 +20,13 @@ function paramDecorator(source: ParamSource, name?: string): ParameterDecorator 
       Reflect.getOwnMetadata(ROUTE_PARAMS, controller) ?? new Map();
     const params = byHandler.get(propertyKey) ?? [];
 
-    params.push({ index: parameterIndex, source, name });
+    params.push({ index: parameterIndex, source, name, schema });
     byHandler.set(propertyKey, params);
     Reflect.defineMetadata(ROUTE_PARAMS, byHandler, controller);
   };
 }
 
-export const Body = (): ParameterDecorator => paramDecorator('body');
+export const Body = (schema?: unknown): ParameterDecorator => paramDecorator('body', undefined, schema);
 export const Param = (name: string): ParameterDecorator => paramDecorator('param', name);
 export const Query = (name: string): ParameterDecorator => paramDecorator('query', name);
 

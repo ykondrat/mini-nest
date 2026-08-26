@@ -4,9 +4,27 @@ import type { TlsOptions } from 'node:tls';
 
 import { Container, type ProviderDefinition } from './container';
 import type { Constructor } from './tokens';
-import { Router, type RouteMatch } from './router';
+import { Router, type Route, type RouteMatch } from './router';
 import { ValidationPipe } from './pipes/validation.pipe';
+import { ZodValidationPipe } from './pipes/zod-validation.pipe';
 import { HttpException } from './http-exception';
+import { ForbiddenException, NotFoundError } from './errors';
+import { requestContext, resolveRequestId } from './context/request-context';
+import { getGuards } from './decorators/use-guards';
+import { getInterceptors } from './decorators/use-interceptors';
+import { runFilters } from './filters/exception.filter';
+import type {
+  ApplicationOptions,
+  CallHandler,
+  CanActivate,
+  ExceptionFilter,
+  ExecutionContext,
+  HookRef,
+  Middleware,
+  NestInterceptor,
+  PipeMetadata,
+  PipeTransform,
+} from './lifecycle/contracts';
 import {
   listen as serverListen,
   listenTls as serverListenTls,
@@ -19,25 +37,23 @@ export type { ServerHandle };
 
 type ControllerInstance = Record<PropertyKey, (...args: unknown[]) => unknown>;
 
-interface DispatchContext {
-  request: RawRequest;
-  url: URL;
-  match: RouteMatch;
-  body: unknown;
-  args: unknown[];
-  response: RawResponse;
-}
-
-type DispatchStage = (ctx: DispatchContext) => void | Promise<void>;
-
 export class Application {
   readonly container: Container;
   private readonly router: Router;
   private readonly instances = new Map<Constructor, ControllerInstance>();
   private readonly validationPipe: ValidationPipe;
-  private readonly stages: DispatchStage[];
+  private readonly zodPipe: ZodValidationPipe;
+  private readonly middleware: Middleware[];
+  private readonly guards: CanActivate[];
+  private readonly interceptors: NestInterceptor[];
+  private readonly pipes: PipeTransform[];
+  private readonly filters: ExceptionFilter[];
 
-  constructor(controllers: Constructor[], providers: ProviderDefinition[] = []) {
+  constructor(
+    controllers: Constructor[],
+    providers: ProviderDefinition[] = [],
+    options: ApplicationOptions = {},
+  ) {
     this.container = new Container();
 
     for (const provider of providers) {
@@ -52,60 +68,83 @@ export class Application {
     }
 
     this.validationPipe = this.container.resolve(ValidationPipe);
+    this.zodPipe = this.container.resolve(ZodValidationPipe);
 
-    this.stages = [
-      (ctx) => this.resolveUrl(ctx),
-      (ctx) => this.matchRoute(ctx),
-      (ctx) => this.parseBody(ctx),
-      (ctx) => this.buildArgs(ctx),
-      (ctx) => this.invokeHandler(ctx),
-    ];
+    this.middleware = options.middleware ?? [];
+    this.guards = (options.guards ?? []).map((g) => this.resolveHook<CanActivate>(g));
+    this.interceptors = (options.interceptors ?? []).map((i) => this.resolveHook<NestInterceptor>(i));
+    this.pipes = (options.pipes ?? []).map((p) => this.resolveHook<PipeTransform>(p));
+    this.filters = (options.filters ?? []).map((f) => this.resolveHook<ExceptionFilter>(f));
   }
 
   async dispatch(request: RawRequest): Promise<RawResponse> {
-    const ctx = { request } as DispatchContext;
+    const requestId = resolveRequestId(request.headers);
 
-    try {
-      for (const stage of this.stages) {
-        await stage(ctx);
+    return requestContext.run({ requestId }, async () => {
+      let response: RawResponse;
+
+      try {
+        response = await this.handle(request, requestId);
+      } catch (error) {
+        response = runFilters(this.filters, error);
       }
 
-      return ctx.response;
-    } catch (error) {
-      return toErrorResponse(error);
-    }
+      response.headers = { ...response.headers, 'X-Request-Id': requestId };
+
+      return response;
+    });
   }
 
-  private resolveUrl(ctx: DispatchContext): void {
-    ctx.url = new URL(ctx.request.url, `http://${ctx.request.headers.host ?? 'localhost'}`);
-  }
-
-  private matchRoute(ctx: DispatchContext): void {
-    const matched = this.router.match(ctx.request.method, ctx.url.pathname);
+  private async handle(request: RawRequest, requestId: string): Promise<RawResponse> {
+    const url = new URL(request.url, `http://${request.headers.host ?? 'localhost'}`);
+    const matched = this.router.match(request.method, url.pathname);
 
     if (!matched) {
-      throw new HttpException(404, {
-        statusCode: 404,
-        message: `Cannot ${ctx.request.method} ${ctx.url.pathname}`,
-      });
+      throw new NotFoundError(`Cannot ${request.method} ${url.pathname}`);
     }
 
-    ctx.match = matched;
+    const body = parseJsonBody(request.body, request.method);
+    const ctx: ExecutionContext = { request, route: matched.route, requestId };
+
+    for (const mw of this.middleware) {
+      await mw(ctx);
+    }
+
+    const guards = [...this.guards, ...this.routeGuards(matched.route)];
+
+    for (const guard of guards) {
+      const allowed = await guard.canActivate(ctx);
+
+      if (!allowed) throw new ForbiddenException();
+    }
+
+    const interceptors = [...this.interceptors, ...this.routeInterceptors(matched.route)];
+    const core: CallHandler = async () => {
+      const args = await this.buildArguments(matched, url, body);
+      const instance = this.instances.get(matched.route.controller)!;
+
+      return instance[matched.route.handlerName](...args);
+    };
+
+    const result = await runInterceptors(interceptors, ctx, core);
+
+    return { status: defaultStatus(request.method), body: result };
   }
 
-  private parseBody(ctx: DispatchContext): void {
-    ctx.body = parseJsonBody(ctx.request.body, ctx.request.method);
+  private resolveHook<T>(ref: HookRef<T>): T {
+    return typeof ref === 'function' ? (this.container.resolve(ref as Constructor<T>) as T) : ref;
   }
 
-  private async buildArgs(ctx: DispatchContext): Promise<void> {
-    ctx.args = await this.buildArguments(ctx.match, ctx.url, ctx.body);
+  private routeGuards(route: Route): CanActivate[] {
+    return getGuards(route.controller, route.handlerName).map((g) =>
+      this.resolveHook<CanActivate>(g),
+    );
   }
 
-  private async invokeHandler(ctx: DispatchContext): Promise<void> {
-    const instance = this.instances.get(ctx.match.route.controller)!;
-    const result = await instance[ctx.match.route.handlerName](...ctx.args);
-
-    ctx.response = { status: defaultStatus(ctx.request.method), body: result };
+  private routeInterceptors(route: Route): NestInterceptor[] {
+    return getInterceptors(route.controller, route.handlerName).map((i) =>
+      this.resolveHook<NestInterceptor>(i),
+    );
   }
 
   listen(port = 0): Promise<ServerHandle> {
@@ -116,11 +155,7 @@ export class Application {
     return serverListenTls(port, options, (request) => this.dispatch(request));
   }
 
-  private async buildArguments(
-    matched: RouteMatch,
-    url: URL,
-    body: unknown,
-  ): Promise<unknown[]> {
+  private async buildArguments(matched: RouteMatch, url: URL, body: unknown): Promise<unknown[]> {
     const { route, pathParams } = matched;
     const args: unknown[] = [];
 
@@ -135,24 +170,45 @@ export class Application {
             : Object.fromEntries(url.searchParams);
           break;
         case 'body':
-          args[param.index] = await this.validationPipe.transform(
-            body,
-            route.paramTypes[param.index],
-          );
+          args[param.index] = await this.runBodyPipes(param, body, route.paramTypes[param.index]);
           break;
       }
     }
 
     return args;
   }
+
+  private async runBodyPipes(
+    param: { schema?: unknown },
+    body: unknown,
+    metatype: unknown,
+  ): Promise<unknown> {
+    const meta: PipeMetadata = { type: 'body', schema: param.schema, metatype };
+    let value = body;
+
+    for (const pipe of this.pipes) {
+      value = await pipe.transform(value, meta);
+    }
+
+    if (param.schema) {
+      return this.zodPipe.transform(value, meta);
+    }
+
+    return this.validationPipe.transform(value, metatype);
+  }
 }
 
-function toErrorResponse(error: unknown): RawResponse {
-  if (error instanceof HttpException) {
-    return { status: error.status, body: error.body };
-  }
+function runInterceptors(
+  interceptors: NestInterceptor[],
+  ctx: ExecutionContext,
+  core: CallHandler,
+): Promise<unknown> {
+  const chain = interceptors.reduceRight<CallHandler>(
+    (next, interceptor) => () => interceptor.intercept(ctx, next),
+    core,
+  );
 
-  return { status: 500, body: { statusCode: 500, message: 'Internal Server Error' } };
+  return chain();
 }
 
 function defaultStatus(method: string): number {
