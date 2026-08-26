@@ -19,11 +19,23 @@ export type { ServerHandle };
 
 type ControllerInstance = Record<PropertyKey, (...args: unknown[]) => unknown>;
 
+interface DispatchContext {
+  request: RawRequest;
+  url: URL;
+  match: RouteMatch;
+  body: unknown;
+  args: unknown[];
+  response: RawResponse;
+}
+
+type DispatchStage = (ctx: DispatchContext) => void | Promise<void>;
+
 export class Application {
   readonly container: Container;
   private readonly router: Router;
   private readonly instances = new Map<Constructor, ControllerInstance>();
-  private readonly validationPipe = new ValidationPipe();
+  private readonly validationPipe: ValidationPipe;
+  private readonly stages: DispatchStage[];
 
   constructor(controllers: Constructor[], providers: ProviderDefinition[] = []) {
     this.container = new Container();
@@ -38,29 +50,62 @@ export class Application {
       this.container.register(controller);
       this.instances.set(controller, this.container.resolve(controller) as ControllerInstance);
     }
+
+    this.validationPipe = this.container.resolve(ValidationPipe);
+
+    this.stages = [
+      (ctx) => this.resolveUrl(ctx),
+      (ctx) => this.matchRoute(ctx),
+      (ctx) => this.parseBody(ctx),
+      (ctx) => this.buildArgs(ctx),
+      (ctx) => this.invokeHandler(ctx),
+    ];
   }
 
   async dispatch(request: RawRequest): Promise<RawResponse> {
+    const ctx = { request } as DispatchContext;
+
     try {
-      const url = new URL(request.url, `http://${request.headers.host ?? 'localhost'}`);
-      const matched = this.router.match(request.method, url.pathname);
-
-      if (!matched) {
-        return { status: 404, body: { statusCode: 404, message: `Cannot ${request.method} ${url.pathname}` } };
+      for (const stage of this.stages) {
+        await stage(ctx);
       }
 
-      const body = parseJsonBody(request.body, request.method);
-      const args = await this.buildArguments(matched, url, body);
-      const instance = this.instances.get(matched.route.controller)!;
-      const result = await instance[matched.route.handlerName](...args);
-
-      return { status: defaultStatus(request.method), body: result };
+      return ctx.response;
     } catch (error) {
-      if (error instanceof HttpException) {
-        return { status: error.status, body: error.body };
-      }
-      return { status: 500, body: { statusCode: 500, message: 'Internal Server Error' } };
+      return toErrorResponse(error);
     }
+  }
+
+  private resolveUrl(ctx: DispatchContext): void {
+    ctx.url = new URL(ctx.request.url, `http://${ctx.request.headers.host ?? 'localhost'}`);
+  }
+
+  private matchRoute(ctx: DispatchContext): void {
+    const matched = this.router.match(ctx.request.method, ctx.url.pathname);
+
+    if (!matched) {
+      throw new HttpException(404, {
+        statusCode: 404,
+        message: `Cannot ${ctx.request.method} ${ctx.url.pathname}`,
+      });
+    }
+
+    ctx.match = matched;
+  }
+
+  private parseBody(ctx: DispatchContext): void {
+    ctx.body = parseJsonBody(ctx.request.body, ctx.request.method);
+  }
+
+  private async buildArgs(ctx: DispatchContext): Promise<void> {
+    ctx.args = await this.buildArguments(ctx.match, ctx.url, ctx.body);
+  }
+
+  private async invokeHandler(ctx: DispatchContext): Promise<void> {
+    const instance = this.instances.get(ctx.match.route.controller)!;
+    const result = await instance[ctx.match.route.handlerName](...ctx.args);
+
+    ctx.response = { status: defaultStatus(ctx.request.method), body: result };
   }
 
   listen(port = 0): Promise<ServerHandle> {
@@ -100,6 +145,14 @@ export class Application {
 
     return args;
   }
+}
+
+function toErrorResponse(error: unknown): RawResponse {
+  if (error instanceof HttpException) {
+    return { status: error.status, body: error.body };
+  }
+
+  return { status: 500, body: { statusCode: 500, message: 'Internal Server Error' } };
 }
 
 function defaultStatus(method: string): number {

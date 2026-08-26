@@ -60,6 +60,43 @@ export function parseHead(head: string): {
   return { method, path, httpVersion, headers };
 }
 
+export function isChunked(headers: Record<string, string>): boolean {
+  return (headers['transfer-encoding'] ?? '')
+    .toLowerCase()
+    .split(',')
+    .map((token) => token.trim())
+    .includes('chunked');
+}
+
+export function decodeChunked(buf: Buffer): Buffer | null {
+  const parts: Buffer[] = [];
+  let offset = 0;
+
+  for (;;) {
+    const lineEnd = buf.indexOf(CRLF, offset);
+
+    if (lineEnd === -1) return null;
+
+    const sizeToken = buf.subarray(offset, lineEnd).toString('ascii').split(';')[0].trim(); // ';' → chunk-extensions
+    const size = Number.parseInt(sizeToken, 16);
+
+    if (Number.isNaN(size) || size < 0) throw new Error('invalid chunk size');
+
+    const dataStart = lineEnd + CRLF.length;
+
+    if (size === 0) {
+      return buf.indexOf(CRLF, dataStart) === -1 ? null : Buffer.concat(parts);
+    }
+
+    const dataEnd = dataStart + size;
+
+    if (buf.length < dataEnd + CRLF.length) return null;
+
+    parts.push(buf.subarray(dataStart, dataEnd));
+    offset = dataEnd + CRLF.length;
+  }
+}
+
 export function buildResponse(response: RawResponse): Buffer {
   const reason = REASON_PHRASES[response.status] ?? 'OK';
   const payload = response.body === undefined ? '' : JSON.stringify(response.body);
@@ -90,18 +127,43 @@ export function createConnectionHandler(
 
       const headText = buffer.subarray(0, separator).toString('utf-8');
       const parsed = parseHead(headText);
-      const contentLength = Number(parsed.headers['content-length'] ?? '0') || 0;
       const bodyStart = separator + HEADER_END.length;
-      const bodyReceived = buffer.length - bodyStart;
 
-      if (bodyReceived < contentLength) return;
+      let body: string | undefined;
+
+      if (isChunked(parsed.headers)) {
+        let decoded: Buffer | null;
+
+        try {
+          decoded = decodeChunked(buffer.subarray(bodyStart));
+        } catch {
+          socket.removeListener('data', onData);
+          socket.end(
+            buildResponse({
+              status: 400,
+              body: { statusCode: 400, message: 'Malformed chunked body' },
+            }),
+          );
+
+          return;
+        }
+
+        if (decoded === null) return;
+
+        body = decoded.length > 0 ? decoded.toString('utf-8') : undefined;
+      } else {
+        const contentLength = Number(parsed.headers['content-length'] ?? '0') || 0;
+        const bodyReceived = buffer.length - bodyStart;
+
+        if (bodyReceived < contentLength) return;
+
+        body =
+          contentLength > 0
+            ? buffer.subarray(bodyStart, bodyStart + contentLength).toString('utf-8')
+            : undefined;
+      }
 
       socket.removeListener('data', onData);
-
-      const body =
-        contentLength > 0
-          ? buffer.subarray(bodyStart, bodyStart + contentLength).toString('utf-8')
-          : undefined;
 
       const request: RawRequest = {
         method: parsed.method,

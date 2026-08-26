@@ -16,7 +16,11 @@ export interface Route {
 interface CompiledRoute extends Route {
   regex: RegExp;
   keys: string[];
+  scores: number[];
 }
+
+const SEGMENT_STATIC = 2;
+const SEGMENT_PARAM = 1;
 
 export interface RouteMatch {
   route: Route;
@@ -33,7 +37,7 @@ export class Router {
 
       for (const route of getRoutes(controller)) {
         const fullPath = joinPaths(prefix, route.path);
-        const { regex, keys } = compilePath(fullPath);
+        const { regex, keys, scores } = compilePath(fullPath);
 
         this.routes.push({
           controller,
@@ -44,9 +48,12 @@ export class Router {
             Reflect.getMetadata('design:paramtypes', prototype, route.handlerName) ?? [],
           regex,
           keys,
+          scores,
         });
       }
     }
+
+    this.routes.sort((a, b) => compareSpecificity(a.scores, b.scores));
   }
 
   match(httpMethod: string, pathname: string): RouteMatch | null {
@@ -78,21 +85,35 @@ export function joinPaths(...parts: string[]): string {
   return '/' + segments.join('/');
 }
 
-function compilePath(path: string): { regex: RegExp; keys: string[] } {
+function compilePath(path: string): { regex: RegExp; keys: string[]; scores: number[] } {
   const keys: string[] = [];
+  const scores: number[] = [];
   const source = path
     .split('/')
     .filter(Boolean)
     .map((segment) => {
       if (segment.startsWith(':')) {
         keys.push(segment.slice(1));
+        scores.push(SEGMENT_PARAM);
 
         return '([^/]+)';
       }
+
+      scores.push(SEGMENT_STATIC);
 
       return segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     })
     .join('/');
 
-  return { regex: new RegExp(`^/${source}/?$`), keys };
+  return { regex: new RegExp(`^/${source}/?$`), keys, scores };
+}
+
+function compareSpecificity(a: number[], b: number[]): number {
+  const len = Math.min(a.length, b.length);
+
+  for (let i = 0; i < len; i += 1) {
+    if (a[i] !== b[i]) return b[i] - a[i];
+  }
+
+  return b.length - a.length;
 }

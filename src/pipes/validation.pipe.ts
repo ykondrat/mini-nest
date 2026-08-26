@@ -5,12 +5,14 @@ import { validate } from 'class-validator';
 
 import type { Constructor } from '../tokens';
 import { HttpException } from '../http-exception';
+import { Injectable } from '../decorators/injectable';
 
 export interface FieldError {
   field: string;
   constraints: string[];
 }
 
+@Injectable()
 export class ValidationPipe {
   async transform(value: unknown, metatype: unknown): Promise<unknown> {
     if (!this.shouldValidate(metatype)) {
