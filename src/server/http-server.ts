@@ -9,6 +9,7 @@ const REASON_PHRASES: Record<number, string> = {
   200: 'OK',
   201: 'Created',
   400: 'Bad Request',
+  403: 'Forbidden',
   404: 'Not Found',
   500: 'Internal Server Error',
 };
@@ -23,6 +24,7 @@ export interface RawRequest {
 export interface RawResponse {
   status: number;
   body: unknown;
+  headers?: Record<string, string>;
 }
 
 export type Dispatch = (request: RawRequest) => Promise<RawResponse>;
@@ -77,7 +79,7 @@ export function decodeChunked(buf: Buffer): Buffer | null {
 
     if (lineEnd === -1) return null;
 
-    const sizeToken = buf.subarray(offset, lineEnd).toString('ascii').split(';')[0].trim(); // ';' → chunk-extensions
+    const sizeToken = buf.subarray(offset, lineEnd).toString('ascii').split(';')[0].trim();
     const size = Number.parseInt(sizeToken, 16);
 
     if (Number.isNaN(size) || size < 0) throw new Error('invalid chunk size');
@@ -97,16 +99,26 @@ export function decodeChunked(buf: Buffer): Buffer | null {
   }
 }
 
+const RESERVED_HEADERS = new Set(['content-type', 'content-length', 'connection']);
+
 export function buildResponse(response: RawResponse): Buffer {
   const reason = REASON_PHRASES[response.status] ?? 'OK';
   const payload = response.body === undefined ? '' : JSON.stringify(response.body);
   const bodyBuffer = Buffer.from(payload, 'utf-8');
-  const head =
+
+  let head =
     `HTTP/1.1 ${response.status} ${reason}${CRLF}` +
     `Content-Type: application/json${CRLF}` +
     `Content-Length: ${bodyBuffer.length}${CRLF}` +
-    `Connection: close${CRLF}` +
-    CRLF;
+    `Connection: close${CRLF}`;
+
+  for (const [key, value] of Object.entries(response.headers ?? {})) {
+    if (RESERVED_HEADERS.has(key.toLowerCase())) continue;
+
+    head += `${key}: ${value}${CRLF}`;
+  }
+
+  head += CRLF;
 
   return Buffer.concat([Buffer.from(head, 'utf-8'), bodyBuffer]);
 }

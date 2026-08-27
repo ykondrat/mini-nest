@@ -6,6 +6,7 @@ import { Injectable } from '../decorators/injectable';
 import { Inject } from '../decorators/inject';
 import { DATABASE_POOL } from '../tokens';
 import { HttpException } from '../http-exception';
+import { NotFoundError } from '../errors';
 import { CreateUserDto } from '../dto/create-user.dto';
 
 export interface User {
@@ -31,7 +32,7 @@ export class UsersService {
     const { rows } = await this.pool.query('SELECT id, name, email FROM users WHERE id = $1', [id]);
 
     if (rows.length === 0) {
-      throw new HttpException(404, { statusCode: 404, message: `User ${id} not found` });
+      throw new NotFoundError(`User ${id} not found`);
     }
 
     return rows[0] as User;
